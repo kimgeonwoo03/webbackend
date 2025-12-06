@@ -1,175 +1,117 @@
-// server.js
+// server.js (최종 통합본)
 
-// 1. 필요한 모듈 불러오기
-require('dotenv').config(); // .env 파일 로드
-const db = require('./db'); // db.js 모듈 불러오기
+// **1. dotenv를 가장 먼저 로드합니다.**
+require('dotenv').config(); // .env 파일의 환경 변수 로드
+
+// 2. 필요한 모듈 가져오기
 const express = require('express');
+const mysql = require('mysql2');
+const cors = require('cors'); 
+// ✨ 인증/인가에 필요한 모듈 추가
+const jwt = require('jsonwebtoken'); 
+const bcrypt = require('bcrypt');     // userRoutes에 전달하기 위해 require합니다.
+
+// 3. 환경 변수와 모듈 정의
 const app = express();
-const port = process.env.PORT || 3000; // 환경 변수에서 포트를 가져오거나 기본값 사용
+const PORT = 3000; // 백엔드 포트
+const FRONTEND_PORT = 5173; // React 프론트엔드 포트
+const JWT_SECRET = process.env.JWT_SECRET; // JWT_SECRET 정의 (정상)
 
-// 2. 미들웨어 설정
-app.use(express.json()); // JSON 형태의 요청 본문(body)을 파싱합니다.
-// app.use(express.urlencoded({ extended: true })); // URL-encoded 본문 파싱이 필요할 경우 추가
 
-// 3. 기본 라우팅
-app.get('/', (req, res) => {
-  res.send('백엔드 서버가 Express로 실행 중입니다!');
-});
+// 4. MySQL 연결 풀(Connection Pool) 설정
+const pool = mysql.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_DATABASE,
+    port: process.env.DB_PORT,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+}).promise(); // Promise API를 사용 가능하도록 설정
 
-app.get('/users', async (req, res) => {
-  try {
-    // SQL 쿼리 실행
-    const [rows, fields] = await db.query('SELECT * FROM users'); 
-    res.json(rows);
-  } catch (err) {
-    console.error('MySQL 쿼리 실행 오류:', err);
-    res.status(500).send('데이터베이스 오류');
-  }
-});
 
-// 모든 상품 목록을 조회하는 API
-app.get('/api/products', async (req, res) => {
-  try {
-    // 💡 SQL 쿼리 작성 (products와 product_variants를 연결하여 기본 정보와 가격 정보를 가져옴)
-    const query = `
-      SELECT 
-          p.product_id, 
-          p.name, 
-          p.base_price,
-          pv.representative_image_url,
-          pv.discount_rate,
-          p.base_price * (1 - pv.discount_rate / 100) AS final_price
-      FROM 
-          products p
-      JOIN 
-          product_variants pv ON p.product_id = pv.product_id
-      WHERE 
-          pv.variant_id IN (
-              SELECT MIN(variant_id) FROM product_variants GROUP BY product_id
-          )
-      ORDER BY 
-          p.created_at DESC;
-    `;
-
-    // 쿼리 실행
-    const [rows] = await db.query(query);
-
-    // 성공적으로 데이터를 JSON 형태로 응답
-    res.status(200).json({ 
-      success: true, 
-      data: rows 
-    });
-
-  } catch (error) {
-    console.error('상품 목록 조회 중 오류 발생:', error);
-    // 오류가 발생하면 500 상태 코드와 메시지를 응답
-    res.status(500).json({ 
-      success: false, 
-      message: '서버 데이터베이스 오류' 
-    });
-  }
-});
-
-// 상품 상세 정보를 조회하는 API
-app.get('/api/products/:productId', async (req, res) => {
-  const productId = req.params.productId;
-
-  try {
-    // 1. 상품의 핵심 정보 (products 테이블)를 가져옵니다.
-    const productQuery = `
-      SELECT 
-          p.product_id, p.name, p.description, p.base_price, p.gender, p.badge, p.is_recommended,
-          m.title AS material_name
-      FROM 
-          products p
-      LEFT JOIN 
-          materials m ON p.material_id = m.material_id
-      WHERE 
-          p.product_id = ?;
-    `;
-    const [productRows] = await db.query(productQuery, [productId]);
-    
-    // 상품이 존재하지 않으면 404 응답
-    if (productRows.length === 0) {
-      return res.status(404).json({ success: false, message: '상품을 찾을 수 없습니다.' });
+// 5. 연결 테스트 함수 (기존 코드 유지)
+async function testDbConnection() {
+    try {
+        const connection = await pool.getConnection();
+        console.log("✅ MySQL 데이터베이스에 성공적으로 연결되었습니다.");
+        connection.release(); 
+    } catch (error) {
+        console.error("❌ MySQL 연결 오류:", error.message);
     }
-    const product = productRows[0];
+}
+testDbConnection();
 
 
-    // 2. 모든 상품 Variants (색상/할인 정보)와 Options (사이즈/재고)를 가져옵니다.
-    const variantsQuery = `
-      SELECT 
-          pv.variant_id, pv.color_name, pv.color_hex, pv.representative_image_url, pv.discount_rate,
-          po.option_id, po.size, po.stock_quantity
-      FROM 
-          product_variants pv
-      LEFT JOIN 
-          product_options po ON pv.variant_id = po.variant_id
-      WHERE 
-          pv.product_id = ?
-      ORDER BY 
-          pv.variant_id, CAST(po.size AS UNSIGNED);
-    `;
-    const [variantOptionRows] = await db.query(variantsQuery, [productId]);
-
-    // 데이터를 Variants 중심으로 구조화합니다.
-    const variants = {};
-    variantOptionRows.forEach(row => {
-      if (!variants[row.variant_id]) {
-        // Variant (색상) 정보 초기화
-        variants[row.variant_id] = {
-          variant_id: row.variant_id,
-          color_name: row.color_name,
-          color_hex: row.color_hex,
-          representative_image_url: row.representative_image_url,
-          discount_rate: row.discount_rate,
-          // 판매가 계산 (기본 가격 * (1 - 할인율/100))
-          final_price: product.base_price * (1 - row.discount_rate / 100), 
-          options: [],
-        };
-      }
-      
-      // Option (사이즈/재고) 정보 추가
-      if (row.option_id) {
-          variants[row.variant_id].options.push({
-              option_id: row.option_id,
-              size: row.size,
-              stock_quantity: row.stock_quantity,
-          });
-      }
-    });
+// **6. 인증/인가 미들웨어 정의**
+// JWT_SECRET 정의 후에 와야 합니다.
+const authMiddleware = require('../middleware/auth')({ JWT_SECRET });
+const adminAuth = require('../middleware/adminAuth');
 
 
-    // 3. 상품 상세 설명 섹션 (product_details)을 가져옵니다.
-    const detailsQuery = `
-      SELECT section_title, content
-      FROM product_details
-      WHERE product_id = ?
-      ORDER BY sort_order;
-    `;
-    const [detailsRows] = await db.query(detailsQuery, [productId]);
+// 7. Express 미들웨어 설정
+// 7-1. JSON 요청 파싱 (라우터보다 먼저 와야 합니다.)
+app.use(express.json()); 
+
+// 7-2. CORS 미들웨어 설정 (프론트엔드 연결 필수!)
+app.use(cors({
+    origin: `http://localhost:${FRONTEND_PORT}`, 
+    credentials: true,
+}));
 
 
-    // 4. 모든 정보를 하나의 객체로 통합하여 응답합니다.
-    const responseData = {
-      ...product, // product_id, name, base_price, material_name 등
-      variants: Object.values(variants), // 구조화된 Variants 목록
-      details: detailsRows, // 상세 설명 목록
-    };
+// **8. 라우터 파일에 의존성 주입하여 불러오기 및 연결**
+// userRoutes는 모든 미들웨어 설정 후에 연결하는 것이 일반적입니다.
+const userRoutes = require('../user/user')({ pool, JWT_SECRET, bcrypt });
+app.use('/user', userRoutes);
 
-    res.status(200).json({
-      success: true,
-      data: responseData
-    });
+const productRoutes = require('../product/product')({ pool, authMiddleware, adminAuth })
+app.use('/api', productRoutes);
 
-  } catch (error) {
-    console.error(`상품 ID ${productId} 조회 중 오류 발생:`, error);
-    res.status(500).json({ success: false, message: '서버 데이터베이스 오류' });
-  }
+// 9. 기본 라우트 설정 (상태 확인용)
+app.get('/', (req, res) => {
+    res.send('Express 서버가 실행 중입니다. (기본 모드)');
 });
 
 
-// 4. 서버 시작
-app.listen(port, () => {
-  console.log(`✅ 서버가 http://localhost:${port} 에서 실행 중입니다.`);
+// **10. 인증/인가 테스트 라우트 (미들웨어 테스트용)**
+// 토큰 검증 미들웨어 테스트
+app.get('/mypage', authMiddleware, (req, res) => {
+    res.json({
+        message: '보호된 페이지에 접근 성공',
+        role: req.user.role, 
+        detail: 'JWT 토큰에서 추출된 정보입니다.'
+    });
+});
+
+// 관리자 권한 미들웨어 테스트
+app.get('/admin/dashboard', authMiddleware, adminAuth, (req, res) => {
+    res.json({
+        message: '✅ 관리자 대시보드 접근 성공!',
+        role: req.user.role,
+        detail: '관리자 권한으로만 이 정보를 볼 수 있습니다.'
+    });
+});
+
+
+// 11. 데이터베이스 쿼리 예시 라우트 (상품 목록)
+app.get('/api/products', async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT product_id, name, base_price FROM products LIMIT 5');
+        res.json({
+            message: '✅ 상품 목록 조회 성공',
+            products: rows
+        });
+    } catch (error) {
+        console.error('DB 쿼리 오류:', error);
+        res.status(500).json({ error: '데이터베이스에서 데이터를 가져오는 데 실패했습니다.' });
+    }
+});
+
+
+// 12. 서버 시작
+app.listen(PORT, () => {
+    console.log(`🚀 서버가 http://localhost:${PORT} 에서 실행 중입니다.`);
+    console.log(`🤝 React 웹 (${FRONTEND_PORT})과 통신 준비 완료.`);
 });
