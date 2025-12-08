@@ -1,5 +1,3 @@
-// product/product.js
-
 const express = require('express');
 
 // server.js에서 전달받은 의존성 (pool, authMiddleware, adminAuth) 사용
@@ -10,44 +8,53 @@ module.exports = ({ pool, authMiddleware, adminAuth }) => {
     // 엔드포인트: /api/products/popular-list
     router.get('/products/popular-list', async (req, res) => {
         try {
-            // products 테이블의 컬럼 구조를 바탕으로 쿼리 작성 (이미지 참조)
+            // 프론트엔드 카드가 필요로 하는 데이터: 
+            // id, rank, name, detail(색상명), price, originalPrice, image, sizes(배열)
+            
             const sql = `
                 SELECT 
-    p.product_id AS groupId,
-    p.name AS groupName,
-    p.base_price AS basePrice,
-    (
-        SELECT JSON_ARRAYAGG(
-            JSON_OBJECT(
-                'variantId', pv.variant_id,
-                'colorName', pv.color_name,
-                'image', pv.representative_image_url,
-                'discountRate', pv.discount_rate,
-                'registrationDate', pv.registration_date,
-                'options', (
-                    SELECT JSON_ARRAYAGG(
-                        JSON_OBJECT(
-                            'size', CAST(po.size AS UNSIGNED),
-                            'stock', po.stock_quantity
-                        )
-                    )
-                    FROM product_options po
-                    WHERE po.variant_id = pv.variant_id
-                    ORDER BY CAST(po.size AS UNSIGNED) ASC
-                )
-            )
-        )
-        FROM product_variants pv
-        WHERE pv.product_id = p.product_id
-    ) AS variants
-FROM products p;
+                    pv.variant_id AS id,
+                    p.name AS name,
+                    pv.color_name AS detail,
+                    p.base_price AS originalPrice,
+                    -- 할인율이 적용된 최종 가격 계산 (소수점 버림)
+                    CAST(p.base_price * (1 - COALESCE(pv.discount_rate, 0) / 100) AS UNSIGNED) AS price,
+                    pv.representative_image_url AS image,
+                    -- 해당 색상(Variant)의 재고가 있는 사이즈만 배열로 추출
+                    (
+                        SELECT JSON_ARRAYAGG(po.size)
+                        FROM product_options po
+                        WHERE po.variant_id = pv.variant_id AND po.stock_quantity > 0
+                    ) AS sizes
+                FROM product_variants pv
+                JOIN products p ON pv.product_id = p.product_id
+                -- 조건: 인기순 또는 최신순 (여기서는 최신 등록순 10개)
+                ORDER BY pv.registration_date DESC
+                LIMIT 10;
             `;
             
             const [rows] = await pool.query(sql);
 
+            // DB에서 가져온 데이터를 프론트엔드 형식에 맞게 가공
+            const formattedRows = rows.map((row, index) => {
+                // sizes가 가끔 문자열로 반환되는 경우(DB 버전 차이)를 대비해 파싱
+                let sizesArray = [];
+                try {
+                    sizesArray = typeof row.sizes === 'string' ? JSON.parse(row.sizes) : row.sizes;
+                } catch (e) {
+                    sizesArray = [];
+                }
+
+                return {
+                    ...row,
+                    rank: index + 1, // 1위, 2위... 순위 부여
+                    sizes: sizesArray || [] // null일 경우 빈 배열
+                };
+            });
+
             res.json({
                 message: '✅ 인기 상품 목록 조회 성공',
-                products: rows
+                products: formattedRows
             });
 
         } catch (error) {
@@ -57,10 +64,8 @@ FROM products p;
     });
 
     // --- 2. [POST] 상품 추가 (관리자 전용) ------------------------------
-    // 엔드포인트: /api/products
-    // 미들웨어 순서: 1. 토큰 검증 (authMiddleware), 2. 관리자 권한 검증 (adminAuth)
+    // (기존 코드 유지)
     router.post('/products', authMiddleware, adminAuth, async (req, res) => {
-        // 클라이언트에서 받아야 할 상품 정보
         const { name, description, base_price, gender, material_id, badge } = req.body;
 
         if (!name || !base_price || !material_id) {
@@ -68,14 +73,12 @@ FROM products p;
         }
 
         try {
-            // DB에 상품 정보를 삽입
             const sql = `
                 INSERT INTO products (name, description, base_price, gender, material_id, badge)
                 VALUES (?, ?, ?, ?, ?, ?);
             `;
             const [result] = await pool.query(sql, [name, description, base_price, gender, material_id, badge]);
             
-            // 성공 응답
             res.status(201).json({
                 message: '✅ 새로운 상품이 성공적으로 등록되었습니다.',
                 productId: result.insertId,
@@ -88,7 +91,8 @@ FROM products p;
         }
     });
     
-    // 💡 참고: [PUT] 상품 수정, [DELETE] 상품 삭제 라우트는 여기에 추가됩니다.
-    
+    // --- 3. [GET] 소재 목록 조회 등 나머지 라우트들... (기존 코드 유지) ---
+    // (이 부분은 수정할 필요 없이 그대로 두시면 됩니다)
+
     return router;
 };
