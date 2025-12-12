@@ -63,11 +63,26 @@ app.use(cors({
 
 // **8. 라우터 파일에 의존성 주입하여 불러오기 및 연결**
 // userRoutes는 모든 미들웨어 설정 후에 연결하는 것이 일반적입니다.
+
+// (1) 회원 관련 라우터
 const userRoutes = require('../user/user')({ pool, JWT_SECRET, bcrypt });
 app.use('/user', userRoutes);
 
+// (2) 상품 관련 라우터
 const productRoutes = require('../product/product')({ pool, authMiddleware, adminAuth })
 app.use('/api', productRoutes);
+
+// (3) ★[추가됨] 주문 관련 라우터 연결★
+// 경로가 /api/user 로 시작하고, 라우터 내부에서 /orders 를 처리하므로
+// 최종 주소는 /api/user/orders 가 됩니다.
+try {
+    const orderRouter = require('../order/order')({ pool, authMiddleware });
+    app.use('/api/user', orderRouter);
+    console.log('✅ 주문 라우터(Order Router)가 연결되었습니다.');
+} catch (error) {
+    console.error('⚠️ 주문 라우터 연결 실패 (파일 경로를 확인하세요):', error.message);
+}
+
 
 // 9. 기본 라우트 설정 (상태 확인용)
 app.get('/', (req, res) => {
