@@ -150,8 +150,43 @@ LIMIT 10
                 }
 
                 // ✅ 대표 색상
-                const mainVariant = productVariants[0];
+                let mainVariant = productVariants.find(v => {
+    if (!v.sale_start_date || !v.sale_end_date || !v.discount) return false;
 
+    const start = new Date(v.sale_start_date);
+    const end = new Date(v.sale_end_date);
+    const now = new Date();
+
+    return now >= start && now <= end;
+}) || productVariants[0]
+                // ✅ 모든 변형 중 하나라도 세일 기간이면 true
+const now = new Date();
+
+const isSalePeriod = productVariants.some(v => {
+    if (!v.sale_start_date || !v.sale_end_date || !v.discount) return false;
+
+    const start = new Date(v.sale_start_date);
+    const end = new Date(v.sale_end_date);
+
+    return now >= start && now <= end;
+});
+
+let discount = 0;
+
+const saleVariant = productVariants.find(v => {
+    if (!v.sale_start_date || !v.sale_end_date || !v.discount) return false;
+
+    const start = new Date(v.sale_start_date);
+    const end = new Date(v.sale_end_date);
+
+    return now >= start && now <= end;
+});
+
+if (saleVariant) {
+    discount = saleVariant.discount;  // ← 이것도
+}
+                
+                
                 // ✅ 사이즈 목록
                 const variantSizes = sizes
                     .filter(s => s.variant_id === mainVariant.variant_id)
@@ -166,24 +201,13 @@ LIMIT 10
 
                 // ✅ 가격 계산
                 // ✅ 할인율 적용 여부 계산
-let discount = mainVariant.discount || 0;
 
-if (mainVariant.sale_start_date && mainVariant.sale_end_date) {
-    const now = new Date();
-    const start = new Date(mainVariant.sale_start_date);
-    const end = new Date(mainVariant.sale_end_date);
-
-    // ✅ 세일 기간이 아니면 할인율 0으로 처리
-    if (!(now >= start && now <= end)) {
-        discount = 0;
-    }
-}
 
 // ✅ 최종 가격 계산
 const price = Math.floor(product.originalPrice * (1 - discount / 100));
 
                 // ✅ 카테고리 배열
-                const categories = product.categories
+                let categories = product.categories
                     ? product.categories.split(',').map(c => c.trim())
                     : [];
 
@@ -194,7 +218,15 @@ const price = Math.floor(product.originalPrice * (1 - discount / 100));
                 if (product.badge?.includes('SLIP') && !categories.includes('slipon')) {
                     categories.push('slipon');
                 }
+                // ✅ 기존 sale 태그 제거
+categories = categories.filter(c => c !== 'sale');
 
+// ✅ 세일 기간이면 sale 태그 추가
+if (isSalePeriod && discount > 0) {
+    categories.push('sale');
+}
+
+                // ✅ 세일 기간 기준으로 sale 카테고리 재정의
                 // ✅ 신제품 여부
                 const regDate = new Date(mainVariant.registration_date);
                 const oneMonthAgo = new Date();
@@ -202,18 +234,7 @@ const price = Math.floor(product.originalPrice * (1 - discount / 100));
 
                 if (regDate >= oneMonthAgo && !categories.includes('new')) {
                     categories.push('new');
-                }
-
-                // ✅ 세일 여부
-                if (mainVariant.sale_start_date && mainVariant.sale_end_date && discount > 0) {
-                    const now = new Date();
-                    const saleStart = new Date(mainVariant.sale_start_date);
-                    const saleEnd = new Date(mainVariant.sale_end_date);
-
-                    if (now >= saleStart && now <= saleEnd && !categories.includes('sale')) {
-                        categories.push('sale');
-                    }
-                }
+                }       
 
                 // ✅ ✅ 전체 색상 판매량 합산
                 const totalSoldCount = productVariants.reduce(
