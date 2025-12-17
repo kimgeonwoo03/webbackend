@@ -125,6 +125,12 @@ module.exports = ({ pool, authMiddleware }) => {
                     'UPDATE product_options SET stock_quantity = stock_quantity - ? WHERE option_id = ?',
                     [item.quantity, item.option_id]
                 );
+
+                // ✅ sold_count 증가 (구매 수량만큼)
+                await connection.query(
+                    'UPDATE product_variants SET sold_count = sold_count + ? WHERE variant_id = ?',
+                    [item.quantity, item.variant_id]
+                );
             }
 
             // ✅ 6. 결제된 장바구니 항목 삭제
