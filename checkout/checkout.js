@@ -2,17 +2,34 @@
 
 const express = require('express');
 
-// server.js에서 전달받은 의존성 (pool, authMiddleware) 사용
+// ✅ 공통 할인 적용 함수
+function applySale(basePrice, discountRate, saleStart, saleEnd) {
+    let discount = discountRate || 0;
+
+    if (saleStart && saleEnd) {
+        const now = new Date();
+        const start = new Date(saleStart);
+        const end = new Date(saleEnd);
+
+        if (!(now >= start && now <= end)) {
+            discount = 0;
+        }
+    } else {
+        discount = 0;
+    }
+
+    const finalPrice = Math.floor(basePrice * (1 - discount / 100));
+    return { discount, finalPrice };
+}
+
 module.exports = ({ pool, authMiddleware }) => {
     const router = express.Router();
 
     // --- [POST] 결제 처리 (인증 필요) --------------------------------------
-    // 엔드포인트: /api/checkout
     router.post('/checkout', authMiddleware, async (req, res) => {
         const userId = req.user.userId;
         const { shippingAddress, paymentMethod, cartIds } = req.body;
 
-        // 필수 필드 검증
         if (!shippingAddress || !paymentMethod) {
             return res.status(400).json({ error: '배송 주소와 결제 방법은 필수입니다.' });
         }
@@ -22,7 +39,7 @@ module.exports = ({ pool, authMiddleware }) => {
         try {
             await connection.beginTransaction();
 
-            // 1. 장바구니 항목 조회 (특정 cartIds가 있으면 해당 항목만, 없으면 전체)
+            // ✅ 1. 장바구니 항목 조회
             let cartSql = `
                 SELECT
                     c.cart_id,
@@ -34,6 +51,8 @@ module.exports = ({ pool, authMiddleware }) => {
                     pv.variant_id,
                     pv.color_name,
                     pv.discount_rate,
+                    pv.sale_start_date,
+                    pv.sale_end_date,
                     po.size,
                     po.stock_quantity
                 FROM cart c
@@ -56,7 +75,7 @@ module.exports = ({ pool, authMiddleware }) => {
                 return res.status(400).json({ error: '장바구니가 비어있습니다.' });
             }
 
-            // 2. 재고 확인
+            // ✅ 2. 재고 확인
             for (const item of cartItems) {
                 if (item.stock_quantity < item.quantity) {
                     await connection.rollback();
@@ -66,13 +85,27 @@ module.exports = ({ pool, authMiddleware }) => {
                 }
             }
 
-            // 3. 총 금액 계산
-            const totalAmount = cartItems.reduce((sum, item) => {
-                const discountedPrice = item.base_price * (1 - (item.discount_rate || 0) / 100);
-                return sum + (discountedPrice * item.quantity);
-            }, 0);
+            // ✅ 3. 총 금액 계산 (세일 기간 반영)
+            let totalAmount = 0;
 
-            // 4. 주문 생성
+            const processedItems = cartItems.map(item => {
+                const { finalPrice } = applySale(
+                    item.base_price,
+                    item.discount_rate,
+                    item.sale_start_date,
+                    item.sale_end_date
+                );
+
+                const itemTotal = finalPrice * item.quantity;
+                totalAmount += itemTotal;
+
+                return {
+                    ...item,
+                    finalPrice
+                };
+            });
+
+            // ✅ 4. 주문 생성
             const [orderResult] = await connection.query(
                 `INSERT INTO orders (user_id, total_amount, shipping_address, payment_method, status, created_at)
                  VALUES (?, ?, ?, ?, 'pending', NOW())`,
@@ -80,32 +113,34 @@ module.exports = ({ pool, authMiddleware }) => {
             );
             const orderId = orderResult.insertId;
 
-            // 5. 주문 상세 항목 생성 및 재고 차감
-            for (const item of cartItems) {
-                const itemPrice = item.base_price * (1 - (item.discount_rate || 0) / 100);
-
-                // 주문 상세 삽입
+            // ✅ 5. 주문 상세 생성 + 재고 차감
+            for (const item of processedItems) {
                 await connection.query(
-                    `INSERT INTO order_items (order_id, option_id, quantity, price, created_at)
-                     VALUES (?, ?, ?, ?, NOW())`,
-                    [orderId, item.option_id, item.quantity, Math.round(itemPrice)]
+                    `INSERT INTO order_items (order_id, option_id, quantity, price, is_review_written, created_at)
+                     VALUES (?, ?, ?, ?, FALSE, NOW())`,
+                    [orderId, item.option_id, item.quantity, item.finalPrice]
                 );
 
-                // 재고 차감
                 await connection.query(
                     'UPDATE product_options SET stock_quantity = stock_quantity - ? WHERE option_id = ?',
                     [item.quantity, item.option_id]
                 );
+
+                // ✅ sold_count 증가 (구매 수량만큼)
+                await connection.query(
+                    'UPDATE product_variants SET sold_count = sold_count + ? WHERE variant_id = ?',
+                    [item.quantity, item.variant_id]
+                );
             }
 
-            // 6. 결제된 장바구니 항목 삭제
-            const cartIdsToDelete = cartItems.map(item => item.cart_id);
+            // ✅ 6. 결제된 장바구니 항목 삭제
+            const cartIdsToDelete = processedItems.map(item => item.cart_id);
             await connection.query(
                 'DELETE FROM cart WHERE cart_id IN (?)',
                 [cartIdsToDelete]
             );
 
-            // 7. 주문 상태를 'paid'로 업데이트 (실제 결제 연동 시 PG 응답 후 처리)
+            // ✅ 7. 주문 상태 업데이트
             await connection.query(
                 'UPDATE orders SET status = ? WHERE order_id = ?',
                 ['paid', orderId]
@@ -115,29 +150,20 @@ module.exports = ({ pool, authMiddleware }) => {
 
             res.status(201).json({
                 message: '✅ 결제가 성공적으로 완료되었습니다.',
-                orderId: orderId,
+                orderId,
                 totalAmount: Math.round(totalAmount),
-                itemCount: cartItems.length,
+                itemCount: processedItems.length,
                 status: 'paid'
             });
 
         } catch (error) {
             await connection.rollback();
-            console.error('❌ 결제 처리 오류 상세:', {
-                message: error.message,
-                code: error.code,
-                errno: error.errno,
-                sqlMessage: error.sqlMessage,
-                sql: error.sql,
-                stack: error.stack
-            });
+            console.error('❌ 결제 처리 오류 상세:', error);
 
-            // 에러 메시지를 사용자에게 더 명확하게 전달
             let errorMessage = '결제 처리 중 서버 오류가 발생했습니다.';
 
             if (error.code === 'ER_NO_SUCH_TABLE') {
-                errorMessage = 'orders 테이블이 존재하지 않습니다. 데이터베이스를 확인해주세요.';
-                console.error('💡 해결방법: create_orders_table.sql 파일을 실행하세요.');
+                errorMessage = 'orders 테이블이 존재하지 않습니다.';
             } else if (error.code === 'ER_DUP_ENTRY') {
                 errorMessage = '중복된 주문입니다.';
             } else if (error.code === 'ER_NO_REFERENCED_ROW' || error.code === 'ER_NO_REFERENCED_ROW_2') {
