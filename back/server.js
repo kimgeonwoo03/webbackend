@@ -1,24 +1,23 @@
-// server.js (최종 통합본)
+// server.js (최종 수정본 - 404 에러 해결 및 전체 기능 통합)
 
 // **1. dotenv를 가장 먼저 로드합니다.**
-require('dotenv').config(); // .env 파일의 환경 변수 로드
+require('dotenv').config(); 
 
 // 2. 필요한 모듈 가져오기
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors'); 
-// ✨ 인증/인가에 필요한 모듈 추가
 const jwt = require('jsonwebtoken'); 
-const bcrypt = require('bcrypt');     // userRoutes에 전달하기 위해 require합니다.
+const bcrypt = require('bcrypt');
 
 // 3. 환경 변수와 모듈 정의
 const app = express();
-const PORT = 3000; // 백엔드 포트
-const FRONTEND_PORT = 5173; // React 프론트엔드 포트
-const JWT_SECRET = process.env.JWT_SECRET; // JWT_SECRET 정의 (정상)
+const PORT = 3000; 
+const FRONTEND_PORT = 5173; 
+const JWT_SECRET = process.env.JWT_SECRET; 
 
 
-// 4. MySQL 연결 풀(Connection Pool) 설정
+// 4. MySQL 연결 풀 설정
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -28,10 +27,10 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
-}).promise(); // Promise API를 사용 가능하도록 설정
+}).promise();
 
 
-// 5. 연결 테스트 함수 (기존 코드 유지)
+// 5. 연결 테스트 함수
 async function testDbConnection() {
     try {
         const connection = await pool.getConnection();
@@ -45,88 +44,101 @@ testDbConnection();
 
 
 // **6. 인증/인가 미들웨어 정의**
-// JWT_SECRET 정의 후에 와야 합니다.
 const authMiddleware = require('../middleware/auth')({ JWT_SECRET });
 const adminAuth = require('../middleware/adminAuth');
 
 
 // 7. Express 미들웨어 설정
-// 7-1. JSON 요청 파싱 (라우터보다 먼저 와야 합니다.)
 app.use(express.json()); 
-
-// 7-2. CORS 미들웨어 설정 (프론트엔드 연결 필수!)
 app.use(cors({
     origin: `http://localhost:${FRONTEND_PORT}`, 
     credentials: true,
 }));
 
 
-// **8. 라우터 파일에 의존성 주입하여 불러오기 및 연결**
-// userRoutes는 모든 미들웨어 설정 후에 연결하는 것이 일반적입니다.
+// **8. 라우터 연결**
 
 // (1) 회원 관련 라우터
 const userRoutes = require('../user/user')({ pool, JWT_SECRET, bcrypt });
 app.use('/user', userRoutes);
 
-// (2) 상품 관련 라우터
-const productRoutes = require('../product/product')({ pool, authMiddleware, adminAuth })
-app.use('/api', productRoutes);
 
-// (3) ★[추가됨] 주문 관련 라우터 연결★
-// 경로가 /api/user 로 시작하고, 라우터 내부에서 /orders 를 처리하므로
-// 최종 주소는 /api/user/orders 가 됩니다.
+// ✅ 로그인한 사용자 정보 조회 (프론트의 authApi.getMe()와 매칭)
+app.get('/api/user/me', authMiddleware, (req, res) => {
+    res.json({
+        user: {
+            user_id: req.user.userId,
+            name: req.user.name,
+            email: req.user.email,
+            role: req.user.role
+        }
+    });
+});
+
+// (2) 🛒 [일반 고객용] 상품 라우터 (Leeproduct.js)
+const customerProductRoutes = require('../mainproduct/Leeproduct')({ pool, authMiddleware }); 
+app.use('/api', customerProductRoutes);
+
+
+// (3) 🔧 [관리자용] 상품 라우터 (product.js) - ✨ [수정됨] 경로 중복 방지
+// product.js 내부에서 이미 '/admin/...' 경로를 정의하고 있으므로, 여기서는 '/api'에 연결해야 합니다.
+const adminProductRoutes = require('../product/product')({ pool, authMiddleware, adminAuth });
+app.use('/api', adminProductRoutes);
+
+
+// (4) 📦 주문 관련 라우터
 try {
     const orderRouter = require('../order/order')({ pool, authMiddleware });
     app.use('/api/user', orderRouter);
-    console.log('✅ 주문 라우터(Order Router)가 연결되었습니다.');
+    console.log('✅ 주문 라우터 연결 완료');
 } catch (error) {
-    console.error('⚠️ 주문 라우터 연결 실패 (파일 경로를 확인하세요):', error.message);
+    console.error('⚠️ 주문 라우터 연결 실패:', error.message);
+}
+
+// (5) ⭐ 리뷰 관련 라우터
+try {
+    const reviewRouter = require('../review/review')({ pool, authMiddleware });
+    app.use('/api', reviewRouter); 
+    console.log('✅ 리뷰 라우터 연결 완료');
+} catch (error) {
+    console.error('⚠️ 리뷰 라우터 연결 실패 (파일 경로를 확인하세요):', error.message);
+}
+
+// (6) 🛒 장바구니 관련 라우터
+try {
+    const cartRouter = require('../cart/cart')({ pool, authMiddleware });
+    app.use('/api', cartRouter); 
+    console.log('✅ 장바구니 라우터 연결 완료');
+} catch (error) {
+    console.error('⚠️ 장바구니 라우터 연결 실패 (파일 경로를 확인하세요):', error.message);
+}
+
+// (7) 💳 결제 관련 라우터
+try {
+    const checkoutRouter = require('../checkout/checkout')({ pool, authMiddleware });
+    app.use('/api', checkoutRouter); 
+    console.log('✅ 결제 라우터 연결 완료');
+} catch (error) {
+    console.error('⚠️ 결제 라우터 연결 실패 (파일 경로를 확인하세요):', error.message);
 }
 
 
-// 9. 기본 라우트 설정 (상태 확인용)
+// 9. 기본 라우트
 app.get('/', (req, res) => {
-    res.send('Express 서버가 실행 중입니다. (기본 모드)');
+    res.send('Express 서버가 실행 중입니다.');
 });
 
-
-// **10. 인증/인가 테스트 라우트 (미들웨어 테스트용)**
-// 토큰 검증 미들웨어 테스트
+// 10. 테스트 라우트 (로그인/관리자 확인용)
 app.get('/mypage', authMiddleware, (req, res) => {
-    res.json({
-        message: '보호된 페이지에 접근 성공',
-        role: req.user.role, 
-        detail: 'JWT 토큰에서 추출된 정보입니다.'
-    });
+    res.json({ message: '인증 성공', role: req.user.role });
 });
-
-// 관리자 권한 미들웨어 테스트
 app.get('/admin/dashboard', authMiddleware, adminAuth, (req, res) => {
-    res.json({
-        message: '✅ 관리자 대시보드 접근 성공!',
-        role: req.user.role,
-        detail: '관리자 권한으로만 이 정보를 볼 수 있습니다.'
-    });
-});
-
-
-// 11. 데이터베이스 쿼리 예시 라우트 (상품 목록)
-app.get('/api/products', async (req, res) => {
-    try {
-        const [rows] = await pool.query('SELECT product_id, name, base_price FROM products LIMIT 5');
-        res.json({
-            message: '✅ 상품 목록 조회 성공',
-            products: rows
-        });
-    } catch (error) {
-        console.error('DB 쿼리 오류:', error);
-        res.status(500).json({ error: '데이터베이스에서 데이터를 가져오는 데 실패했습니다.' });
-    }
+    res.json({ message: '관리자 권한 확인됨', role: req.user.role });
 });
 
 
 // 12. 서버 시작
 app.listen(PORT, () => {
     console.log(`🚀 서버가 http://localhost:${PORT} 에서 실행 중입니다.`);
-    console.log(`🤝 React 웹 (${FRONTEND_PORT})과 통신 준비 완료.`);
+    console.log(`- 관리자 API: http://localhost:${PORT}/api/admin/products`);
 });

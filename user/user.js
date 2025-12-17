@@ -46,7 +46,7 @@ module.exports = ({ pool, JWT_SECRET }) => {
                 name: user.name
             };
 
-            const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
+            const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '12h' });
 
             // 4. 응답 전송
             res.status(200).json({
